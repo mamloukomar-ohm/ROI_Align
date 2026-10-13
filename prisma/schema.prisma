@@ -1,0 +1,187 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// --- Roles ---------------------------------------------------------------
+
+enum Role {
+  SUBMITTER
+  REVIEWER
+  DECISION_MAKER
+}
+
+// --- Dimensions ------------------------------------------------------------
+
+enum Dimension {
+  BUSINESS_VALUE
+  STRATEGIC_FIT
+  AI_READINESS
+  IMPLEMENTATION_EFFORT
+  GOVERNANCE_RISK
+}
+
+// --- Use case lifecycle (M18) ----------------------------------------------
+
+enum UseCaseStatus {
+  SUBMITTED
+  CLARIFYING
+  ASSESSED
+  REVIEWED
+  DECIDED
+}
+
+enum DecisionOutcome {
+  START
+  STOP
+  CONTINUE
+}
+
+// --- Company knowledge (M6, M13, M14) ---------------------------------------
+// Versioned snapshot of the context the AI uses to score use cases. A new
+// version triggers automatic re-scoring of every use case (M13).
+
+model CompanyKnowledgeVersion {
+  id            Int      @id @default(autoincrement()) // also serves as the version number
+  companyName   String
+  strategyGoals String // JSON array of { name, description } strategic goals, incl. ESG
+  techStack     String // JSON array of strings
+  aiReadiness   String // free text description of current AI readiness level
+  governance    String // free text description of governance / risk requirements
+  changeReason  String? // why this version was created (M14)
+  createdAt     DateTime @default(now())
+
+  assessments Assessment[]
+}
+
+// --- Use cases ---------------------------------------------------------------
+
+model UseCase {
+  id            Int           @id @default(autoincrement())
+  title         String
+  rawInput      String // the original free text / parsed file content submitted
+  inputType     String // "text" | "document" | "excel"
+  submitterRole Role
+  submitterName String
+  status        UseCaseStatus @default(SUBMITTED)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  extractedFields   ExtractedField[]
+  followUpQuestions FollowUpQuestion[]
+  assessments       Assessment[]
+  decision          Decision?
+}
+
+// AI-extracted structured fields from the raw submission (M2), each labeled
+// as an assumption or not (M5).
+
+model ExtractedField {
+  id           Int     @id @default(autoincrement())
+  useCaseId    Int
+  useCase      UseCase @relation(fields: [useCaseId], references: [id], onDelete: Cascade)
+  fieldName    String
+  fieldValue   String
+  isAssumption Boolean @default(false)
+  rationale    String?
+
+  @@index([useCaseId])
+}
+
+// Follow-up questions the AI asks when it cannot make a reliable assumption (M4).
+
+model FollowUpQuestion {
+  id         Int       @id @default(autoincrement())
+  useCaseId  Int
+  useCase    UseCase   @relation(fields: [useCaseId], references: [id], onDelete: Cascade)
+  question   String
+  answer     String?
+  askedAt    DateTime  @default(now())
+  answeredAt DateTime?
+
+  @@index([useCaseId])
+}
+
+// A versioned assessment of a use case against the current company knowledge
+// (M7-M9, M13, M14). A use case can have many assessments over time; the
+// latest one (by version) is the current one.
+
+model Assessment {
+  id                        Int                     @id @default(autoincrement())
+  useCaseId                 Int
+  useCase                   UseCase                 @relation(fields: [useCaseId], references: [id], onDelete: Cascade)
+  companyKnowledgeVersionId Int
+  companyKnowledgeVersion   CompanyKnowledgeVersion @relation(fields: [companyKnowledgeVersionId], references: [id])
+  versionNumber             Int // 1, 2, 3... per use case
+  triggeredBy               String // "submission" | "review-edit" | "rescore"
+  changeSummary             String? // what changed vs. previous version and why (M14)
+  createdAt                 DateTime                @default(now())
+
+  dimensionScores   DimensionScore[]
+  goalContributions GoalContribution[]
+
+  @@unique([useCaseId, versionNumber])
+  @@index([useCaseId])
+}
+
+// Score + rationale for one of the five dimensions within an assessment (M7, M8).
+
+model DimensionScore {
+  id            Int        @id @default(autoincrement())
+  assessmentId  Int
+  assessment    Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  dimension     Dimension
+  score         Int // 1-5
+  weight        Float // weight at time of scoring, default equal (0.2 each)
+  rationale     String
+  isAssumption  Boolean    @default(false)
+  editedByHuman Boolean    @default(false)
+
+  @@unique([assessmentId, dimension])
+  @@index([assessmentId])
+}
+
+// Which strategic goals a use case contributes to, per assessment (M9).
+
+model GoalContribution {
+  id               Int        @id @default(autoincrement())
+  assessmentId     Int
+  assessment       Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  goalName         String
+  contributionNote String
+
+  @@index([assessmentId])
+}
+
+// Final start/stop/continue decision for a use case (M12).
+
+model Decision {
+  id        Int             @id @default(autoincrement())
+  useCaseId Int             @unique
+  useCase   UseCase         @relation(fields: [useCaseId], references: [id], onDelete: Cascade)
+  outcome   DecisionOutcome
+  decidedBy String
+  rationale String
+  decidedAt DateTime        @default(now())
+}
+
+// In-app notifications (M15): follow-up questions, completed assessments,
+// rank changes after re-scoring.
+
+model Notification {
+  id               Int      @id @default(autoincrement())
+  targetRole       Role
+  message          String
+  relatedUseCaseId Int?
+  read             Boolean  @default(false)
+  createdAt        DateTime @default(now())
+
+  @@index([targetRole, read])
+}
